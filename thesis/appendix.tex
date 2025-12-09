@@ -1,0 +1,776 @@
+\titleformat{\section}[block]
+  {\large\bfseries\centering}
+  {\thesection\ }{}{}
+\chapter*{ПРИЛОЖЕНИЕ А}
+\addcontentsline{toc}{chapter}{ПРИЛОЖЕНИЕ А}
+\section*{\centering Код программы. Модель автокодировщика}
+\begin{footnotesize}
+\begin{lstlisting}
+import numpy as np
+import tensorflow as tf
+from tf_vae.vgg16 import vgg16
+
+class dfc_vae_model(object):
+    
+    def __init__(self, shape, inputs, alpha = 1, beta = 0.5, vgg_layers = [], learning_rate = 0.0005):
+        self.shape = shape
+        self.img_input = inputs
+        self.alpha = alpha
+        self.beta = beta
+        self.gstep = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
+        self.vgg_layers = vgg_layers
+        self.learning_rate = learning_rate
+    
+    def _get_weights(self, name, shape):
+        with tf.variable_scope("weights", reuse=tf.AUTO_REUSE) as scope:
+            w = tf.get_variable(name=name + '_W',
+                                shape=shape,
+                                initializer=tf.truncated_normal_initializer(stddev=0.1))
+        return w
+    
+    def _get_biases(self, name, shape):
+        with tf.variable_scope("biases", reuse=tf.AUTO_REUSE) as scope:
+            b = tf.get_variable(name=name + '_b',
+                                shape=shape,
+                                initializer=tf.truncated_normal_initializer(stddev=0.1))
+        return b
+    
+    def _conv2d_bn_relu(self, inputs, name, kernel_size, in_channel, out_channel, stride, activation=True,bn=True):
+        with tf.variable_scope(name) as scope:
+            
+            ### setup weights and biases
+            filters = self._get_weights(name, shape=[kernel_size, kernel_size, in_channel, out_channel])
+            biases = self._get_biases(name, shape=[out_channel])
+            
+            ### convolutional neural network
+            conv2d = tf.nn.conv2d(input=inputs,
+                                 filter=filters,
+                                 strides=[1,stride,stride,1],
+                                 padding='SAME',
+                                 name=name + '_conv')
+            conv2d = tf.nn.bias_add(conv2d, biases, name=name+'_add')
+            
+            ### in case of batch normalization
+            if bn == True:
+                conv2d = tf.contrib.layers.batch_norm(conv2d, 
+                                              center=True, scale=True, 
+                                              is_training=True,
+                                              scope='bn')
+            
+            ### in case of leaky relu activation
+            if activation == True:
+                conv2d = tf.nn.leaky_relu(conv2d, alpha=0.1, name=name)
+        
+        return conv2d
+        
+    def encoder(self, reuse=False):
+        
+        with tf.variable_scope("encoder", reuse = reuse):
+            ### Conv2d_bn_relu Layer 1
+            conv1 = self._conv2d_bn_relu(self.img_input,
+                                   name="conv1",
+                                   kernel_size=4,
+                                   in_channel=3,
+                                   out_channel=32,
+                                   stride=2)
+
+            ### Conv2d_bn_relu Layer 2
+            conv2 = self._conv2d_bn_relu(conv1,
+                                   name="conv2",
+                                   kernel_size=4,
+                                   in_channel=32,
+                                   out_channel=64,
+                                   stride=2)
+
+            ### Conv2d_bn_relu Layer 3
+            conv3 = self._conv2d_bn_relu(conv2,
+                                   name="conv3",
+                                   kernel_size=4,
+                                   in_channel=64,
+                                   out_channel=128,
+                                   stride=2)
+
+            ### Conv2d_bn_relu Layer 4
+            conv4 = self._conv2d_bn_relu(conv3,
+                                   name="conv4",
+                                   kernel_size=4,
+                                   in_channel=128,
+                                   out_channel=256,
+                                   stride=2)
+
+            ### flatten the output
+            conv4_flat = tf.reshape(conv4, [-1, 256*4*4])
+
+            ### FC Layer for mean
+            fcmean = tf.layers.dense(inputs=conv4_flat,
+                                  units=8,
+                                 activation=None,
+                                 name="fcmean")
+
+            ### FC Layer for standard deviation
+            fcstd = tf.layers.dense(inputs=conv4_flat,
+                                   units=8,
+                                   activation=None,
+                                   name="fcstd")
+        
+        ### fcmean and fcstd will be used for sample z value (latent variables)
+        return fcmean, fcstd + 1e-6
+        
+    def decoder(self,inputs, reuse=False):
+        
+        with tf.variable_scope("decoder", reuse = reuse):
+            ### FC Layer for z
+            fc = tf.layers.dense(inputs=inputs,
+                                units = 4096,
+                                activation = None)
+            fc = tf.reshape(fc, [-1, 4, 4, 256])
+
+            ### Layer 1
+            deconv1 = tf.image.resize_nearest_neighbor(fc, size=(8,8))
+            deconv1 = self._conv2d_bn_relu(deconv1,
+                                   name="deconv1",
+                                   kernel_size=3,
+                                   in_channel=256,
+                                   out_channel=128,
+                                   stride=1)
+
+            ### Layer 2
+            deconv2 = tf.image.resize_nearest_neighbor(deconv1, size=(16,16))
+            deconv2 = self._conv2d_bn_relu(deconv2,
+                                   name="deconv2",
+                                   kernel_size=3,
+                                   in_channel=128,
+                                   out_channel=64,
+                                   stride=1)
+
+            ### Layer 3
+            deconv3 = tf.image.resize_nearest_neighbor(deconv2, size=(32,32))
+            deconv3 = self._conv2d_bn_relu(deconv3,
+                                   name="deconv3",
+                                   kernel_size=3,
+                                   in_channel=64,
+                                   out_channel=32,
+                                   stride=1)  
+
+            ### Layer 4
+            deconv4 = tf.image.resize_nearest_neighbor(deconv3, size=(64,64))
+            deconv4 = self._conv2d_bn_relu(deconv4,
+                                           name="deconv4",
+                                           kernel_size=3,
+                                           in_channel=32,
+                                           out_channel=3,
+                                           stride=1,
+                                           activation=False,
+                                           bn=False)
+            
+        return deconv4
+    
+    def load_vgg(self):
+        
+        ### pass the input image to VGG model
+        self.resize_input_img = tf.image.resize_images(self.img_input, [224,224])
+        self.vgg_real = vgg16(self.resize_input_img, 'vgg16_weights.npz')
+        self.l1_r, self.l2_r, self.l3_r = self.vgg_real.get_layers()
+        
+        self.resize_gen_img = tf.image.resize_images(self.gen_img, [224,224])
+        self.vgg_gen = vgg16(self.resize_gen_img, 'vgg16_weights.npz')
+        self.l1_g, self.l2_g, self.l3_g = self.vgg_gen.get_layers()
+        
+    def calculate_loss(self):
+        
+        ### calculate perception loss
+        l1_loss = tf.reduce_sum(tf.square(self.l1_r-self.l1_g), [1,2,3])
+        l2_loss = tf.reduce_sum(tf.square(self.l2_r-self.l2_g), [1,2,3])
+        l3_loss = tf.reduce_sum(tf.square(self.l3_r-self.l3_g), [1,2,3])
+        self.pct_loss = tf.reduce_mean(l1_loss + l2_loss + l3_loss)
+        
+        ### calculate KL loss
+        self.kl_loss = tf.reduce_mean(-0.5*tf.reduce_sum(
+            1 + self.std - tf.square(self.mean) - tf.exp(self.std), 1))
+        
+        ### calculate total loss
+        self.loss = tf.add(self.beta*self.pct_loss,self.alpha*self.kl_loss)
+        
+    def optimize(self):
+        
+        ### create optimizer
+        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='encoder') + tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='decoder')
+        self.optimizer = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss,global_step=self.gstep, var_list=var_list)
+    
+    def build_model(self,reuse=tf.AUTO_REUSE):
+        ### get mean and std from encoder
+        self.mean, self.std = self.encoder(reuse)
+        ### sampling z and use reparameterization trick
+        epsilon = tf.random_normal((tf.shape(self.mean)[0],8), mean = 0.0, stddev=1.0)
+        self.z = self.mean + epsilon * tf.exp(.5*self.std)
+        ### decode to get a generated image
+        self.gen_img = self.decoder(self.z,reuse)
+        ### load vgg
+        self.load_vgg()
+        ### calculate loss
+        self.calculate_loss()
+        ### setup optimizer
+        self.optimize()
+        ### generate random latent variable for random images
+        self.random_latent = tf.random_normal((tf.shape(self.mean)[0], 8))
+        self.ran_img = self.decoder(self.random_latent,reuse)
+        
+    ### load VGG weight
+    def load_vgg_weight(self, weight_file, sess):
+        self.vgg_real.load_weights(weight_file,sess)
+        self.vgg_gen.load_weights(weight_file,sess)
+        
+                
+\end{lstlisting}
+\end{footnotesize}
+
+\chapter*{ПРИЛОЖЕНИЕ Б}
+\addcontentsline{toc}{chapter}{ПРИЛОЖЕНИЕ Б}
+\section*{\centering Код программы. Обучение автокодировщика}
+\begin{footnotesize}
+\begin{lstlisting}
+
+import dfc_vae_model as dfc
+import tensorflow as tf
+import numpy as np
+import cv2
+import scipy.misc
+import urllib
+from zipfile import ZipFile
+from PIL import Image
+import matplotlib.pyplot as plt
+import os
+import sys
+import imageio
+
+############# Hyper-Parameters ################
+### Adjust parameters in this part
+BATCH_SIZE = 32
+NUM_EPOCH = 10
+VGG_LAYERS = ['conv1_1','conv2_1','conv3_1']
+ALPHA = 1
+BETA = 8e-6
+LEARNING_RATE = 0.0001
+IMG_HEIGHT = 64
+IMG_WIDTH = 64
+TRAINING_DATA = 'celeb_data_tfrecord'
+IMG_MEAN = np.array([134.10714722, 102.52040863, 87.15436554])
+IMG_STDDEV = np.sqrt(np.array([3941.30175781, 2856.94287109, 2519.35791016]))
+###############################################
+
+
+### get the image
+def crop_center_image(img):
+    width_start = int(img.shape[1]/2 - 150/2)
+    height_start = int(img.shape[0]/2 - 150/2)
+    cropped_img = img[height_start: height_start+150, width_start: width_start+150, :]
+    #print(cropped_img.shape)
+    return cropped_img
+
+### download according to address provided and perform cropping
+def load_and_crop_image(img, img_width, img_height):
+    img = scipy.misc.imread(img_addr)
+    img = crop_center_image(img)
+    img = scipy.misc.imresize(img, [img_width,img_height])
+    return img
+
+def register_extension(id, extension):
+    Image.EXTENSION[extension.lower()] = id.upper()
+
+def register_extensions(id, extensions): 
+    for extension in extensions: register_extension(id, extension)
+
+### create grid_img
+### the image inputs will be 4 dimensions, which 0 dimention is the number of example
+def build_grid_img(inputs, img_height, img_width, n_row, n_col):
+    grid_img = np.zeros((img_height*n_row, img_width*n_col, 3))
+    print(inputs.shape)
+    count = 0
+    for i in range(n_col):
+        for j in range(n_row):
+            grid_img[i*img_height:(i+1)*img_height, j*img_width:(j+1)*img_width,:] = inputs[count]
+            count += 1
+    return grid_img
+    
+### save images as a grid
+def save_grid_img(inputs, path, img_height, img_width, n_row, n_col):
+    
+    Image.register_extension = register_extension
+    Image.register_extensions = register_extensions
+    grid_img = build_grid_img(inputs, img_height, img_width, n_row, n_col)
+    scipy.misc.imsave(path, grid_img)
+
+def _int64_feature(value):
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
+def _bytes_feature(value):
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+### convert image into binary format
+def get_image_binary(img):
+    shape = np.array(img.shape, np.int32)
+    img = np.asarray(img,np.uint8)
+    return img.tobytes(), shape.tobytes()
+
+### write data into tf record file format (images are stored in zip file)
+def write_tfrecord(tfrecord_filename, zipFileName, img_height, img_width):
+    
+    ### images counter
+    count = 0
+    
+    ### create a writer
+    writer = tf.python_io.TFRecordWriter(tfrecord_filename)
+    
+    with ZipFile(zipFileName) as archive:
+        
+        for entry in archive.infolist():
+            
+            # skip the folder content
+            if entry.filename == 'content/':
+                continue
+                
+            with archive.open(entry) as file:
+                
+                sys.stdout.write('\r'+str(count))
+                
+                ### pre-process data
+                img = np.asarray(Image.open(file))
+                img = crop_center_image(img)
+                img = scipy.misc.imresize(img, [img_height,img_width])
+                img, shape = get_image_binary(img)
+                
+                ### create features
+                feature = {'image': _bytes_feature(img),
+                           'shape':_bytes_feature(shape)}
+                features = tf.train.Features(feature=feature)
+                
+                ### create example
+                example = tf.train.Example(features=features)
+                
+                ### write example
+                writer.write(example.SerializeToString())
+                sys.stdout.flush()
+                
+                count += 1
+        
+        writer.close()
+            
+### parse serialized data back into the usable form
+def _parse(serialized_data):
+    features = {'image': tf.FixedLenFeature([], tf.string),
+               'shape': tf.FixedLenFeature([], tf.string)}
+    features = tf.parse_single_example(serialized_data,
+                                      features)
+    img = tf.cast(tf.decode_raw(features['image'],tf.uint8), tf.float32)
+    shape = tf.decode_raw(features['shape'],tf.int32)
+    img = tf.reshape(img, shape)
+    
+    return img
+
+### read tf record
+def read_tfrecord(tfrecord_filename):
+    
+    ### create dataset
+    dataset = tf.data.TFRecordDataset(tfrecord_filename)
+    dataset = dataset.map(_parse)
+    return dataset
+
+def download(url, file_path):
+    if os.path.exists(file_path):
+        print("the file is already existed")
+        return
+    else:
+        print("downloading file...")
+    urllib.request.urlretrieve(url, file_path) 
+    print("downloading done")
+    
+### restore checkpoint from "Checkpoint" folder
+def _restore_checkpoint(saver, sess):
+    
+    ckpt_path = os.path.dirname(os.path.join(os.getcwd(),'checkpoint/'))
+    ckpt = tf.train.get_checkpoint_state(ckpt_path)
+    if ckpt and ckpt.model_checkpoint_path:
+        saver.restore(sess, ckpt.model_checkpoint_path)
+        print("get checkpoint")
+    return ckpt_path
+
+### create dataset and return iterator and dataset
+def _get_data(training_data_tfrecord, batch_size):
+    
+    dataset = util.read_tfrecord(training_data_tfrecord)
+    dataset = dataset.batch(batch_size)
+    iterator = dataset.make_initializable_iterator()
+    return iterator, dataset
+    
+def train_dfc_vae():
+    
+    ### setup hyper-parameter
+    batch_size = BATCH_SIZE
+    epoch = NUM_EPOCH
+    vgg_layers = VGG_LAYERS
+    alpha = ALPHA
+    beta = BETA
+    learning_rate = LEARNING_RATE
+    img_height = IMG_HEIGHT
+    img_width = IMG_WIDTH
+    training_data_tfrecord = TRAINING_DATA
+    
+    ### get training data 
+    iterator, _ = _get_data(training_data_tfrecord, batch_size)
+
+    ### create iterator's initializer for training data 
+    iterator_init = iterator.initializer
+    data = iterator.get_next()
+    
+    ### define input data
+    img_input = (tf.reshape(data, shape=[-1, img_height, img_width, 3])-IMG_MEAN) / IMG_STDDEV
+    
+    ### build model graph
+    model = dfc.dfc_vae_model([img_height,img_width], img_input, alpha, beta, vgg_layers, learning_rate)
+    model.build_model(tf.AUTO_REUSE)
+    
+    ### create saver for restoring and saving variables
+    saver = tf.train.Saver()
+    
+    with tf.Session() as sess:
+
+        ### initialize global variable
+        sess.run(tf.global_variables_initializer())
+        
+        ### restore checkpoint
+        ckpt_path = _restore_checkpoint(saver,sess)
+        
+        ### load pre-trained vgg weights
+        model.load_vgg_weight('vgg16_weights.npz', sess)
+        
+        ### lists of losses, used for tracking
+        kl_loss = []
+        pct_loss = []
+        total_loss = []
+        iteration = []
+        
+        ### count how many training iteration (different from epoch)
+        iteration_count = 0
+        
+        for i in range(epoch):
+            
+            ### initialize iterator
+            sess.run(iterator_init)
+            
+            try:
+                while True:
+                    sys.stdout.write('\r' + 'Iteration: ' + str(iteration_count))
+                    sys.stdout.flush()
+                    
+                    ### every 100 iteration, print losses 
+                    if iteration_count % 100 == 0:
+                        pct, kl, loss, tempmean, tempstd = sess.run([model.pct_loss, model.kl_loss, model.loss, model.mean, model.std])
+                        pct = pct * beta
+                        print("\nperceptual loss: {}, kl loss: {}, total loss: {}".format(pct,kl,loss))
+                        print(tempmean[0,0:5])
+                        print(tempstd[0,0:5])
+                        
+                        iteration.append(iteration_count)
+                        kl_loss.append(kl)
+                        pct_loss.append(pct)
+                        total_loss.append(loss)
+                    
+                    ### every 500 iteration, save images
+                    if iteration_count % 500 == 0:
+                        
+                        ### get images from the dfc_vae_model
+                        original_img, gen_img, ran_img = sess.run([model.img_input,model.gen_img,model.ran_img])
+                        
+                        ### denomalize
+                        original_img = original_img*IMG_STDDEV + IMG_MEAN
+                        gen_img = gen_img*IMG_STDDEV + IMG_MEAN
+                        ran_img = ran_img*IMG_STDDEV + IMG_MEAN
+                        
+                        ### clip values to be in RGB range and transform to 0..1 float
+                        original_img = np.clip(original_img,0.,255.).astype('float32')/255.
+                        gen_img = np.clip(gen_img,0.,255.).astype('float32')/255.
+                        ran_img = np.clip(ran_img,0.,255.).astype('float32')/255.
+                        
+                        ### save images in 5x5 grid
+                        util.save_grid_img(original_img, os.path.join(os.getcwd(), 'outputs', str(i) + '_' + str(iteration_count) + '_orginal' + '.png'), img_height, img_width, 5, 5)
+                        util.save_grid_img(gen_img, os.path.join(os.getcwd(), 'outputs', str(i) + '_' + str(iteration_count) + '_generated' + '.png'), img_height, img_width, 5, 5)
+                        util.save_grid_img(ran_img, os.path.join(os.getcwd(), 'outputs', str(i) + '_' + str(iteration_count) + '_random' + '.png'), img_height, img_width, 5, 5)
+                        
+                        ### plot losses
+                        plt.figure()
+                        plt.plot(iteration, kl_loss)
+                        plt.plot(iteration, pct_loss)
+                        plt.plot(iteration, total_loss)
+                        plt.legend(['kl loss', 'perceptual loss', 'total loss'], bbox_to_anchor=(1.05, 1), loc=2)
+                        plt.title('Loss per iteration')
+                        plt.show()
+                    
+                    ### run optimizer
+                    sess.run(model.optimizer)
+                    iteration_count += 1
+
+            except tf.errors.OutOfRangeError:
+                pass
+            
+            ### save session for each epoch
+            ### recommend to change to save encoder, decoder, VGG's variables separately.
+            print("\nepoch: {}, loss: {}".format(i, loss))
+            saver.save(sess, os.path.join(ckpt_path,"Face_Vae"), global_step = iteration_count + model.gstep)
+            print("checkpoint saved")
+            
+
+def test_gen_img(model, sess, i):
+    
+    real_img, gen_img, ran_img = sess.run([model.img_input, model.gen_img, model.ran_img])
+    
+    ran_img = ran_img*IMG_STDDEV + IMG_MEAN
+    real_img = real_img*IMG_STDDEV + IMG_MEAN
+    gen_img = gen_img*IMG_STDDEV + IMG_MEAN
+    
+    ran_img = ran_img/255.
+    real_img = real_img/255.
+    gen_img = gen_img/255.
+    
+    util.save_grid_img(ran_img, os.path.join(os.getcwd(), 'outputs', 'test' , 'random-' + str(i) + '.png'), 64,64,8,8)
+    util.save_grid_img(real_img, os.path.join(os.getcwd(), 'outputs', 'test' , 'real-' + str(i) + '.png'), 64,64,8,8)
+    util.save_grid_img(gen_img, os.path.join(os.getcwd(), 'outputs', 'test' , 'gen-' + str(i) + '.png'), 64,64,8,8)
+    
+def test_interpolation(model, sess, i):
+    
+    z1 = sess.run(model.z)
+    z2 = sess.run(model.z)
+    print(z1.shape)
+    print(z2.shape)
+    print(z1[0,:5])
+    print(z2[0,:5])
+    
+    z = tf.Variable(np.zeros(z1.shape).astype(np.float32))
+    gen_img = model.decoder(z, tf.AUTO_REUSE)
+    
+    interpolated_img_list = []
+    
+    for j in range(31):
+        interpolated_z = z1 * (30-j)/30. + z2 * j/30. 
+        sess.run(z.assign(interpolated_z))
+        interpolated_img = sess.run(gen_img)
+        interpolated_img = interpolated_img*IMG_STDDEV + IMG_MEAN
+        interpolated_img = interpolated_img/255.
+        interpolated_img = util.build_grid_img(interpolated_img, interpolated_img.shape[1], interpolated_img.shape[2],8,8)
+        interpolated_img_list.append(interpolated_img)
+        
+    for j in range(31):
+        imageio.mimsave(os.path.join(os.getcwd(), 'outputs', 'test_interpolated' , 'interpolate' + str(i) + '.gif'), interpolated_img_list)
+    
+    return interpolated_img_list
+    
+    
+def test():
+
+    ### setup hyper-parameter
+    num_test_set = 2
+    batch_size = 64
+    vgg_layers = VGG_LAYERS
+    img_height = IMG_HEIGHT
+    img_width = IMG_WIDTH
+    training_data_tfrecord = TRAINING_DATA
+    ### get training data 
+    iterator, _ = _get_data(training_data_tfrecord, batch_size)
+	### create iterator's initializer for training data 
+    iterator_init = iterator.initializer
+    data = iterator.get_next()
+    ### define input data
+    img_input = (tf.reshape(data, shape=[-1, img_height, img_width, 3]) - IMG_MEAN)/IMG_STDDEV
+    ### build model graph
+    model = dfc.dfc_vae_model([img_height,img_width], img_input)
+    model.build_model(tf.AUTO_REUSE)
+    ### create saver for restoring and saving variables
+    saver = tf.train.Saver()
+    
+    with tf.Session() as sess:
+
+        ### initialize global variable
+        sess.run(tf.global_variables_initializer())
+        
+        ### restore checkpoint
+        ckpt_path = _restore_checkpoint(saver,sess)
+
+        sess.run(iterator_init)
+        
+        for i in range(num_test_set):
+            
+            test_gen_img(model, sess, i)
+            x = test_interpolation(model, sess, i)
+        
+if __name__ == '__main__':
+    tf.reset_default_graph()
+    train_dfc_vae()
+    test()
+\end{lstlisting}
+\end{footnotesize}
+
+\chapter*{ПРИЛОЖЕНИЕ В}
+\addcontentsline{toc}{chapter}{ПРИЛОЖЕНИЕ В}
+\section*{\centering Код программы. Гауссовский процесс и байесовская оптимизаия}
+\begin{footnotesize}
+\begin{lstlisting}
+import tensorflow as tf
+import numpy as np
+import os
+import GPy
+import GPyOpt
+
+import tf_vae.dfc_vae_model as dfc
+
+import matplotlib.pyplot as plt
+
+def _restore_checkpoint(saver, sess):
+    ckpt_path = os.path.dirname(os.path.join(os.getcwd(),'/home/dl/dl/thesis/checkpoint_8/'))
+    ckpt = tf.train.get_checkpoint_state(ckpt_path)
+    if ckpt and ckpt.model_checkpoint_path:
+        saver.restore(sess, ckpt.model_checkpoint_path)
+        print("get checkpoint")
+    return ckpt_path
+
+### define input data
+IMG_MEAN = np.array([134.10714722, 102.52040863, 87.15436554])
+IMG_STDDEV = np.sqrt(np.array([3941.30175781, 2856.94287109, 2519.35791016]))
+img_input = tf.placeholder(dtype=tf.float32, shape=(1,64,64,3))
+
+### build model graph
+model = dfc.dfc_vae_model([64, 64], img_input)
+model.build_model(tf.AUTO_REUSE)
+
+### create saver for restoring and saving variables
+saver = tf.train.Saver()
+sess = tf.Session()
+sess.run(tf.global_variables_initializer())
+
+### restore checkpoint
+ckpt_path = _restore_checkpoint(saver,sess)
+
+class FacialComposit:
+    def __init__(self, model, latent_size):
+        self.latent_size = latent_size
+        self.latent_placeholder = tf.placeholder(tf.float32, (1, latent_size))
+        self.decode = model.decoder(self.latent_placeholder, tf.AUTO_REUSE)
+        self.samples = None
+        self.images = None
+        self.rating = None
+
+    def _get_image(self, latent):
+        img = sess.run(self.decode, 
+                       feed_dict={self.latent_placeholder: latent[None, :]})
+        img = img*IMG_STDDEV + IMG_MEAN
+        img = img/255.
+        return img
+
+    @staticmethod
+    def _show_images(images, titles):
+        assert len(images) == len(titles)
+        clear_output()
+        plt.figure(figsize=(3*len(images), 3))
+        n = len(titles)
+        for i in range(n):
+            plt.subplot(1, n, i+1)
+            plt.imshow(images[i])
+            plt.title(str(titles[i]))
+            plt.axis('off')
+        plt.show()
+
+    @staticmethod
+    def _draw_border(image, w=2):
+        bordred_image = image.copy()
+        bordred_image[:, :w] = [1, 0, 0]
+        bordred_image[:, -w:] = [1, 0, 0]
+        bordred_image[:w, :] = [1, 0, 0]
+        bordred_image[-w:, :] = [1, 0, 0]
+        return bordred_image
+
+    def query_initial(self, n_start=5, select_top=None):
+        '''
+        Creates initial points for Bayesian optimization
+        Generate *n_start* random images and asks user to rank them.
+        Gives maximum score to the best image and minimum to the worst.
+        :param n_start: number of images to rank initialy.
+        :param select_top: number of images to keep
+        '''
+        self.samples = np.zeros((n_start, self.latent_size))
+        
+        self.images = np.zeros((n_start, 64, 64, 3)) 
+        self.rating = np.zeros((n_start,)) 
+        
+        ### Show user some samples (hint: use self._get_image and input())
+        prior_distr = tf.random_normal((1, 8), mean = 0.0, stddev=1.0)
+        for i in range(n_start):
+          self.samples[i] = sess.run(prior_distr)
+          self.images[i] = self._get_image(self.samples[i])
+        self._show_images(self.images, ['num_'+str(i) for i in range(1, n_start+1)])
+        rate = input()
+        self.rating = np.array([ 100*(int(i) / n_start) for i in rate.split(',')])
+        # Check that tensor sizes are correct
+        np.testing.assert_equal(self.rating.shape, [n_start])
+        np.testing.assert_equal(self.images.shape, [n_start, 64, 64, 3])
+        np.testing.assert_equal(self.samples.shape, [n_start, self.latent_size])
+
+    def evaluate(self, candidate):
+        '''
+        Queries candidate vs known image set.
+        Adds candidate into images pool.
+        :param candidate: latent vector of size 1xlatent_size
+        '''
+        initial_size = len(self.images)
+        ## Show user an image and ask to assign score to it.
+        ## You may want to show some images to user along with their scores
+        ## You should also save candidate, corresponding image and rating
+        self._show_images(self.images, self.rating)
+        image = self._get_image(candidate[0])
+        self.images = np.append(self.images, image, axis=0)
+        self._show_images(image, ['mark?'])
+        rate = 100*(int(input())/ initial_size)
+        self.rating = np.append(self.rating, [rate], axis=0)
+        self.samples = np.append(self.samples, candidate, axis=0)
+        
+        candidate_rating = rate 
+        assert len(self.images) == initial_size + 1
+        assert len(self.rating) == initial_size + 1
+        assert len(self.samples) == initial_size + 1
+        return candidate_rating 
+
+    def optimize(self, n_iter=10, w=4, acquisition_type='MPI', acquisition_par=0.3):
+        if self.samples is None:
+            self.query_initial(n_start=5)
+
+        bounds = [{'name': 'z_{0:03d}'.format(i),
+                   'type': 'continuous',
+                   'domain': (-w, w)} 
+                  for i in range(self.latent_size)]
+        optimizer = GPyOpt.methods.BayesianOptimization(f=self.evaluate, domain=bounds,
+                                                        acquisition_type = acquisition_type,
+                                                        acquisition_par = acquisition_par,
+                                                        exact_eval=False, # Since we are not sure
+                                                        model_type='GP',
+                                                        X=self.samples,
+                                                        Y=self.rating[:, None],
+                                                        maximize=True)
+        optimizer.run_optimization(max_iter=n_iter, eps=-1)
+
+    def get_best(self):
+        index_best = np.argmax(self.rating)
+        return self.images[index_best]
+
+    def draw_best(self, title=''):
+        index_best = np.argmax(self.rating)
+        image = self.images[index_best]
+        plt.imshow(image)
+        plt.title(title)
+        plt.axis('off')
+        plt.show()
+composit = FacialComposit(model, 8)
+composit.optimize(n_iter=5)
+composit.draw_best('Darkest hair ')
+composit = FacialComposit(model, 8)
+composit.optimize(n_iter=10)
+composit.draw_best('Widest smile')
+
+\end{lstlisting}
+\end{footnotesize}
