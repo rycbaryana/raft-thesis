@@ -1,0 +1,69 @@
+\documentclass[14pt]{report}
+\usepackage[english,russian]{babel}
+\usepackage{setspace}
+\usepackage[unicode]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{wasysym}
+\usepackage{latexsym}
+\usepackage{indentfirst}
+\usepackage{mathtools}
+\definecolor{linkcolor}{rgb}{0.0,0.0,0.0}
+\definecolor{urlcolor}{HTML}{799B03}
+\hypersetup{pdfstartview=FitH, linkcolor=linkcolor,urlcolor=urlcolor, colorlinks=true}
+\usepackage[14pt]{extsizes}
+\usepackage[
+    left=30mm,
+    top=20mm,
+    right=10mm,
+    bottom=20mm
+]{geometry}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{afterpage}
+\usepackage{titlesec}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{csquotes}
+\usepackage{mathrsfs}
+\usepackage{amssymb}
+\usepackage{caption}
+
+% figure caption type changed
+\captionsetup{labelsep=space}
+\addto\captionsrussian{\renewcommand{\figurename}{Рисунок}}
+% chapter settings
+\titleformat{\chapter}[display]   
+{\centering\Large\bfseries}{\chaptertitlename\ \thechapter}{10pt}{\Large}   
+\titlespacing*{\chapter}{5pt}{-20pt}{30pt}
+
+% section settings
+\titleformat{\section}[block]
+  {\large\bfseries}
+  {\thesection\ }{0pt}{}
+
+% settings for chapters and sections
+\addto\captionsrussian{% Replace "english" with the language you use
+  \renewcommand{\contentsname}%
+    {\centering \large ОГЛАВЛЕНИЕ}%
+  \renewcommand{\chaptername}{ГЛАВА}
+  \renewcommand{\chaptertitlename}{ГЛАВА}
+  \renewcommand{\bibname}{\large СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ}
+}
+
+\renewcommand{\baselinestretch}{1.2}
+
+\begin{document}
+\include{title}
+\tableofcontents
+\include{intro}
+\include{chapter1}
+\include{chapter2}
+\include{chapter3}
+\include{conclusion}
+\include{literature}
+\include{appendix}
+\end{document}
+
+\grid
