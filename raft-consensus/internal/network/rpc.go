@@ -1,14 +1,15 @@
 package network
 
 import (
-	"fmt"
+	"errors"
 	"net/rpc"
 	"raft-consensus/internal/raft"
 	"sync"
 	"time"
 )
 
-const RPCTimeout = 1 * time.Second
+var ErrNetworkPartition = errors.New("network partition: rpc dropped")
+var ErrRPCTimeout = errors.New("rpc timeout")
 
 var _ raft.RaftService = (*RPCClient)(nil)
 
@@ -16,10 +17,11 @@ type RPCClient struct {
 	mu      sync.Mutex
 	address string
 	client  *rpc.Client
+	timeout time.Duration
 }
 
-func NewRPCClient(address string) *RPCClient {
-	return &RPCClient{address: address}
+func NewRPCClient(address string, timeout time.Duration) *RPCClient {
+	return &RPCClient{address: address, timeout: timeout}
 }
 
 func (c *RPCClient) getConnection() (*rpc.Client, error) {
@@ -32,7 +34,7 @@ func (c *RPCClient) getConnection() (*rpc.Client, error) {
 
 	client, err := rpc.DialHTTP("tcp", c.address)
 	if err != nil {
-		return nil, err	
+		return nil, err
 	}
 	c.client = client
 	return client, nil
@@ -48,7 +50,7 @@ func (c *RPCClient) resetConnection() {
 	}
 }
 
-func (c *RPCClient) call(method string, args any, reply any) error {
+func (c *RPCClient) call(method string, args any, reply any, timeout time.Duration) error {
 	client, err := c.getConnection()
 	if err != nil {
 		return err
@@ -63,16 +65,16 @@ func (c *RPCClient) call(method string, args any, reply any) error {
 		}
 		return nil
 
-	case <-time.After(RPCTimeout):
+	case <-time.After(timeout):
 		c.resetConnection()
-		return fmt.Errorf("rpc timeout")
+		return ErrRPCTimeout
 	}
 }
 
 func (c *RPCClient) RequestVote(args *raft.RequestVoteArgs, reply *raft.RequestVoteReply) error {
-	return c.call("Raft.RequestVote", args, reply)
+	return c.call("Raft.RequestVote", args, reply, c.timeout)
 }
 
 func (c *RPCClient) AppendEntries(args *raft.AppendEntriesArgs, reply *raft.AppendEntriesReply) error {
-	return c.call("Raft.AppendEntries", args, reply)
+	return c.call("Raft.AppendEntries", args, reply, c.timeout)
 }

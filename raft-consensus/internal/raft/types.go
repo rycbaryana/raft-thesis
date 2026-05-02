@@ -31,12 +31,12 @@ func (s State) String() string {
 
 type LogEntry struct {
 	Term    Term
-	Command any
+	Command []byte
 }
 
 type ApplyMsg struct {
 	CommandValid bool
-	Command      interface{}
+	Command      []byte
 	CommandIndex LogIndex
 }
 

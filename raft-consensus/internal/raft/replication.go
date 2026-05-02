@@ -1,80 +1,42 @@
 package raft
 
 import (
-	"log"
+	"log/slog"
+	"time"
 )
 
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// log.Printf("[Node %d Term %d] Got AppendEntries from Node %d Term %d", rf.id, rf.currentTerm, args.LeaderID, args.Term)
-	// 1. Term check
-	if args.Term < rf.currentTerm {
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		return nil
-	}
-
-	// 2. Back to Follower if valid leader contacts us
-	rf.resetElectionTimer()
-	if args.Term > rf.currentTerm || rf.state != Follower {
-		rf.becomeFollower(args.Term)
-	}
-	reply.Term = rf.currentTerm
-
-	// 3. Log Consistency Check
-	// Does our log have entry at PrevLogIndex with PrevLogTerm?
-	lastLogIndex, _ := rf.getLastLogInfo()
-
-	if args.PrevLogIndex > lastLogIndex {
-		reply.Success = false
-		return nil
-	}
-
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
-		return nil
-	}
-
-	// 4. Append New Entries
-	for i, entry := range args.Entries {
-		index := args.PrevLogIndex + 1 + LogIndex(i)
-		logSize := LogIndex(len(rf.log))
-
-		if index < logSize && rf.log[index].Term != entry.Term {
-			rf.log = rf.log[:index]
-		}
-		rf.log = append(rf.log, entry)
-	}
-
-	// 5. Update Commit Index
-	if args.LeaderCommit > rf.commitIndex {
-		lastNewIndex := args.PrevLogIndex + LogIndex(len(args.Entries))
-		rf.commitIndex = min(args.LeaderCommit, lastNewIndex)
-
-		go rf.applyLogs()
-	}
-
-	reply.Success = true
-	return nil
+func (rf *Raft) sendReplication(peerId NodeID, peer RaftService) bool {
+	return rf.leaderSendAppendEntries(peerId, peer, false)
 }
 
-func (rf *Raft) sendHeartbeat(peerId NodeID, peer RaftService) {
+func (rf *Raft) broadcastReplication() {
+	for peerId, peer := range rf.peers {
+		if peerId == rf.id {
+			continue
+		}
+		go rf.sendReplication(peerId, peer)
+	}
+}
+
+func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbeatOnly bool) bool {
 	rf.mu.Lock()
 	if rf.state != Leader {
 		rf.mu.Unlock()
-		return
+		return false
 	}
 
 	nextIdx := rf.nextIndex[peerId]
-	var entries []LogEntry
-
 	lastLogIdx, _ := rf.getLastLogInfo()
-	if nextIdx <= lastLogIdx {
-		entries = rf.log[nextIdx:]
+
+	var entries []LogEntry
+	if heartbeatOnly {
+		entries = nil
 	} else {
-		entries = []LogEntry{}
+		if nextIdx > lastLogIdx {
+			rf.mu.Unlock()
+			return true
+		}
+		entries = rf.log[nextIdx:]
 	}
 
 	prevLogIndex := nextIdx - 1
@@ -90,56 +52,100 @@ func (rf *Raft) sendHeartbeat(peerId NodeID, peer RaftService) {
 	}
 	rf.mu.Unlock()
 
-	var reply AppendEntriesReply
+	replyCh := make(chan struct {
+		reply AppendEntriesReply
+		err   error
+	}, 1)
 
-	err := peer.AppendEntries(args, &reply)
-	if err != nil {
-		log.Printf("[Node %d to Node %d] Error on AppendEntries(%d, %d, %d, %d, %v, %d): %v", rf.id, peerId, rf.currentTerm, rf.id, prevLogIndex, prevLogTerm, entries, rf.commitIndex, err)
-		return
+	go func() {
+		var reply AppendEntriesReply
+		err := peer.AppendEntries(args, &reply)
+		replyCh <- struct {
+			reply AppendEntriesReply
+			err   error
+		}{reply, err}
+	}()
+
+	var reply AppendEntriesReply
+	select {
+	case res := <-replyCh:
+		if res.err != nil {
+			rf.mu.Lock()
+			rf.logf(slog.LevelWarn, "Error on AppendEntries to %d: %v", peerId, res.err)
+			rf.mu.Unlock()
+			return false
+		}
+		reply = res.reply
+	case <-time.After(rf.cfg.RPCTimeout):
+		rf.mu.Lock()
+		rf.logf(slog.LevelWarn, "Timeout on AppendEntries to %d", peerId)
+		rf.mu.Unlock()
+		return false
 	}
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.state != Leader {
-		return
+		return false
+	}
+
+	if !reply.Success || len(args.Entries) > 0 || reply.Term > rf.currentTerm {
+		rf.logf(slog.LevelDebug, "AppendEntries response from %d: success=%v term=%d conflictIndex=%d conflictTerm=%d (prevIdx=%d prevTerm=%d entries=%d)",
+			peerId, reply.Success, reply.Term, reply.ConflictIndex, reply.ConflictTerm,
+			args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
 	}
 
 	if reply.Term > rf.currentTerm {
 		rf.becomeFollower(reply.Term)
-		return
+		return false
 	}
 
 	if reply.Success {
 		newMatchIndex := args.PrevLogIndex + LogIndex(len(args.Entries))
 		if newMatchIndex > rf.matchIndex[peerId] {
 			rf.matchIndex[peerId] = newMatchIndex
-			rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
+			rf.nextIndex[peerId] = newMatchIndex + 1
 
 			rf.updateCommitIndex()
 		}
+		if heartbeatOnly {
+			rf.lastHeartbeatAck[peerId] = time.Now()
+		}
+		return true
+	}
+
+	if reply.ConflictTerm == 0 {
+		rf.nextIndex[peerId] = reply.ConflictIndex
 	} else {
-		if rf.nextIndex[peerId] > 1 {
-			rf.nextIndex[peerId]--
+		lastLogIndex, _ := rf.getLastLogInfo()
+		found := false
+		for i := lastLogIndex; i >= 1; i-- {
+			if rf.log[i].Term == reply.ConflictTerm {
+				rf.nextIndex[peerId] = i + 1
+				found = true
+				break
+			}
+			if rf.log[i].Term < reply.ConflictTerm {
+				break
+			}
+		}
+		if !found {
+			rf.nextIndex[peerId] = reply.ConflictIndex
 		}
 	}
-
-}
-
-func (rf *Raft) broadcastHeartbeats() {
-	for peerId, peer := range rf.peers {
-		if peerId == rf.id {
-			continue
-		}
-		go rf.sendHeartbeat(peerId, peer)
+	if rf.nextIndex[peerId] < 1 {
+		rf.nextIndex[peerId] = 1
 	}
+
+	return false
 }
 
 func (rf *Raft) updateCommitIndex() {
 	start := rf.commitIndex + 1
 	last, _ := rf.getLastLogInfo()
 
-	quorum := len(rf.peers) / 2 + 1;
+	quorum := rf.quorumVotes()
 
 	for n := start; n <= last; n++ {
 		if rf.log[n].Term != rf.currentTerm {
@@ -158,39 +164,50 @@ func (rf *Raft) updateCommitIndex() {
 
 		if count >= quorum {
 			rf.commitIndex = n
-			log.Printf("Node %d committed index %d", rf.id, n)
+			rf.logf(slog.LevelInfo, "Committed index %d", n)
 		}
 	}
 
 	if rf.commitIndex > rf.lastApplied {
-		go rf.applyLogs()
+		rf.applyCond.Broadcast()
 	}
 }
 
-
-func (rf *Raft) applyLogs() {
+func (rf *Raft) applier() {
 	rf.mu.Lock()
-	
-	baseIndex := rf.lastApplied
-	commitIndex := rf.commitIndex
-	
-	if baseIndex >= commitIndex {
+	defer rf.mu.Unlock()
+
+	for {
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+
+		baseIndex := rf.lastApplied
+		commitIndex := rf.commitIndex
+
+		entries := make([]LogEntry, commitIndex-baseIndex)
+		copy(entries, rf.log[baseIndex+1:commitIndex+1])
+
 		rf.mu.Unlock()
-		return
-	}
 
-	entries := make([]LogEntry, commitIndex - baseIndex)
-	copy(entries, rf.log[baseIndex+1 : commitIndex+1])
-	
-	rf.lastApplied = commitIndex
-	
-	rf.mu.Unlock()
+		for i, entry := range entries {
+			index := baseIndex + 1 + LogIndex(i)
+			var applyErr error
+			if rf.fsm != nil && entry.Command != nil {
+				rf.logf(slog.LevelDebug, "Applying command %d: %s", index, string(entry.Command))
+				_, applyErr = rf.fsm.Apply(entry.Command)
+				if applyErr != nil {
+					rf.mu.Lock()
+					rf.getFuture(index).err = applyErr
+					rf.mu.Unlock()
+				}
+			}
+		}
 
-	for i, entry := range entries {
-		rf.ApplyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      entry.Command,
-			CommandIndex: baseIndex + 1 + LogIndex(i),
+		rf.mu.Lock()
+		if commitIndex > rf.lastApplied {
+			rf.lastApplied = commitIndex
+			rf.resolveFutures(rf.lastApplied)
 		}
 	}
 }

@@ -1,7 +1,8 @@
 package raft
 
 import (
-	"log"
+	"log/slog"
+	"time"
 )
 
 func (rf *Raft) becomeFollower(term Term) {
@@ -10,9 +11,9 @@ func (rf *Raft) becomeFollower(term Term) {
 	rf.currentTerm = term
 	rf.votedFor = NoNode
 	rf.resetElectionTimer()
-	
+
 	if stateBefore != Follower {
-		log.Printf("[Node %d] State change: %s -> Follower (Term %d)", rf.id, stateBefore, term)
+		rf.logf(slog.LevelInfo, "State change: %s -> Follower", stateBefore)
 	}
 }
 
@@ -21,23 +22,30 @@ func (rf *Raft) becomeCandidate() {
 	rf.currentTerm++
 	rf.votedFor = rf.id
 	rf.resetElectionTimer()
-	
-	log.Printf("[Node %d] State change: Follower -> Candidate (Term %d)", rf.id, rf.currentTerm)
+
+	rf.logf(slog.LevelInfo, "State change: Follower -> Candidate")
 }
 
 func (rf *Raft) becomeLeader() {
 	if rf.state == Leader {
 		return
 	}
-	
+
 	rf.state = Leader
-	log.Printf("[Node %d] State change: Candidate -> LEADER (Term %d)", rf.id, rf.currentTerm)
+	rf.hintLeaderID = rf.id
+	rf.logf(slog.LevelInfo, "State change: Candidate -> LEADER")
 
 	lastIndex, _ := rf.getLastLogInfo()
+	now := time.Now()
 	for peerId := range rf.peers {
 		rf.nextIndex[peerId] = lastIndex + 1
 		rf.matchIndex[peerId] = 0
+		if peerId != rf.id {
+			rf.lastHeartbeatAck[peerId] = now
+		}
 	}
 
-	rf.broadcastHeartbeats()
+	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: nil}) // no-op entry to commit entries from previous term
+
+	rf.broadcastReplication()
 }

@@ -1,54 +1,9 @@
 package raft
 
 import (
-	"log"
+	"log/slog"
+	"time"
 )
-
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	log.Printf("[Node %d Term %d] Got RequestVote from Node %d Term %d", rf.id, rf.currentTerm, args.CandidateID, args.Term)
-	// 1. Term check
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		return nil
-	}
-
-	// 2. Step down if fresher term
-	if args.Term > rf.currentTerm {
-		rf.becomeFollower(args.Term)
-	}
-	reply.Term = rf.currentTerm
-
-	// 3. Check if already voted
-	if rf.votedFor != NoNode && rf.votedFor != args.CandidateID {
-		reply.VoteGranted = false
-		return nil
-	}
-
-	// 4. Log should be up-to-date
-	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
-
-	isLogUpToDate := false
-	if args.LastLogTerm > lastLogTerm {
-		isLogUpToDate = true
-	} else if args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex {
-		isLogUpToDate = true
-	}
-
-	if isLogUpToDate {
-		rf.votedFor = args.CandidateID
-		rf.resetElectionTimer()
-		reply.VoteGranted = true
-		log.Printf("[Node %d] Voted FOR %d in term %d", rf.id, args.CandidateID, rf.currentTerm)
-	} else {
-		reply.VoteGranted = false
-	}
-
-	return nil
-}
 
 func (rf *Raft) startElection() {
 	rf.becomeCandidate()
@@ -56,10 +11,10 @@ func (rf *Raft) startElection() {
 	term := rf.currentTerm
 	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
 
-	// log.Printf("[Node %d] Starting election for term %d", rf.id, term)
+	rf.logf(slog.LevelInfo, "Starting election")
 
 	votesReceived := 1
-	votesNeeded := len(rf.peers)/2 + 1
+	quorumVotes := rf.quorumVotes()
 
 	for peerId, peer := range rf.peers {
 		if peerId == rf.id {
@@ -73,11 +28,35 @@ func (rf *Raft) startElection() {
 				LastLogIndex: lastLogIndex,
 				LastLogTerm:  lastLogTerm,
 			}
-			var reply RequestVoteReply
 
-			err := peer.RequestVote(args, &reply)
-			if err != nil {
-				log.Printf("[Node %d to Node %d] Error on RequestVote(%d, %d, %d, %d): %v", rf.id, peerId, term, rf.id ,lastLogIndex, lastLogTerm, err)
+			replyCh := make(chan struct {
+				reply RequestVoteReply
+				err   error
+			}, 1)
+
+			go func() {
+				var reply RequestVoteReply
+				err := peer.RequestVote(args, &reply)
+				replyCh <- struct {
+					reply RequestVoteReply
+					err   error
+				}{reply, err}
+			}()
+
+			var reply RequestVoteReply
+			select {
+			case res := <-replyCh:
+				if res.err != nil {
+					rf.mu.Lock()
+					rf.logf(slog.LevelWarn, "Error on RequestVote to %d: %v", peerId, res.err)
+					rf.mu.Unlock()
+					return
+				}
+				reply = res.reply
+			case <-time.After(2 * rf.cfg.HeartbeatInterval):
+				rf.mu.Lock()
+				rf.logf(slog.LevelWarn, "Timeout on RequestVote to %d", peerId)
+				rf.mu.Unlock()
 				return
 			}
 
@@ -95,7 +74,7 @@ func (rf *Raft) startElection() {
 
 			if reply.VoteGranted {
 				votesReceived++
-				if votesReceived == votesNeeded {
+				if votesReceived == quorumVotes {
 					rf.becomeLeader()
 				}
 			}
@@ -104,9 +83,6 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) resetElectionTimer() {
-	if rf.electionTimer != nil {
-		rf.electionTimer.Stop()
-	}
-	timeout := getRandomDuration(minElectionTimeout, maxElectionTimeout)
-	rf.electionTimer.Reset(timeout)
+	rf.lastActivity = time.Now()
+	rf.electionTimeout = getRandomDuration(rf.cfg.MinElectionTimeout, rf.cfg.MaxElectionTimeout)
 }
