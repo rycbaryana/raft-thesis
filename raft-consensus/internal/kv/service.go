@@ -26,10 +26,6 @@ func (s *Service) Logger() *slog.Logger {
 	return s.logger
 }
 
-func (s *Service) Stop() {
-	s.rf.Stop()
-}
-
 func (s *Service) LeaderHint() raft.NodeID {
 	return s.rf.LeaderHint()
 }
@@ -56,4 +52,14 @@ func (s *Service) Get(ctx context.Context, key string) (string, error) {
 	}
 
 	return s.machine.Get(key)
+}
+
+func (s *Service) AddClusterNode(ctx context.Context, id raft.NodeID, addr string) error {
+	_ = ctx
+	return s.rf.AddNode(id, addr)
+}
+
+func (s *Service) RemoveClusterNode(ctx context.Context, id raft.NodeID) error {
+	_ = ctx
+	return s.rf.RemoveNode(id)
 }

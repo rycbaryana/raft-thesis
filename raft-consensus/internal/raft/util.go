@@ -31,9 +31,14 @@ func (rf *Raft) getLastLogInfo() (LogIndex, Term) {
 	return 0, 0
 }
 
+// quorumVotes returns the votes needed for a majority of voting members only (learners excluded).
+// Caller must hold rf.mu.
 func (rf *Raft) quorumVotes() int {
-	total := len(rf.peers) + 1
-	return total/2 + 1
+	n := len(rf.voterMembers)
+	if n == 0 {
+		return 1
+	}
+	return n/2 + 1
 }
 
 func getRandomDuration(min time.Duration, max time.Duration) time.Duration {

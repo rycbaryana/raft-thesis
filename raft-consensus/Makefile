@@ -1,7 +1,7 @@
 BINARY_NAME=raft-node
 BUILD_DIR=bin
 LOG_DIR=logs
-CMD_PATH=cmd/node/main.go
+CMD_PATH=./cmd/node
 
 .PHONY: all build clean run-1 run-2 run-3 start-cluster stop-cluster follow-1 follow-2 follow-3 test-req
 

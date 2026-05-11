@@ -11,12 +11,20 @@ var _ RaftService = (*Raft)(nil)
 
 type Raft struct {
 	mu sync.Mutex
+	// readIndexMu serializes ReadIndex quorum rounds to avoid self-induced
+	// no-quorum failures under many concurrent linearizable reads.
+	readIndexMu sync.Mutex
 
 	// Infrastructure
-	id    NodeID
-	fsm   StateMachine
-	peers map[NodeID]RaftService
-	cfg   Config
+	id               NodeID
+	fsm              StateMachine
+	peers            map[NodeID]*Peer
+	peerFactory      PeerFactory
+	bootstrapCluster map[NodeID]string
+	activeMembers    map[NodeID]struct{}
+	voterMembers     map[NodeID]struct{}
+	memberAddrs      map[NodeID]string
+	cfg              Config
 
 	// Persistent state
 	currentTerm Term
@@ -31,6 +39,8 @@ type Raft struct {
 	// Leader Volatile state
 	nextIndex  map[NodeID]LogIndex
 	matchIndex map[NodeID]LogIndex
+	// appendInFlight gates replication pressure: at most one AppendEntries RPC per peer at a time.
+	appendInFlight map[NodeID]bool
 
 	// lastHeartbeatAck records the last time a follower acked an empty AppendEntries (heartbeat).
 	lastHeartbeatAck map[NodeID]time.Time
@@ -46,6 +56,8 @@ type Raft struct {
 	// Control
 	applyCond *sync.Cond
 	stopCh    chan struct{}
+	stopOnce  sync.Once
+	runWG     sync.WaitGroup
 
 	applyFutures map[LogIndex]*indexFuture
 	readTokenSeq uint64
@@ -62,18 +74,26 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// WithConfig replaces timing config. Zero fields in c are filled from DefaultConfig().
 func WithConfig(c Config) Option {
 	return func(rf *Raft) {
 		rf.cfg = c
 	}
 }
 
-func NewRaft(id NodeID, peers map[NodeID]RaftService, fsm StateMachine, opts ...Option) *Raft {
+func NewRaft(id NodeID, fsm StateMachine, factory PeerFactory, initialCluster map[NodeID]string, opts ...Option) *Raft {
+	bootstrap := make(map[NodeID]string, len(initialCluster))
+	for k, v := range initialCluster {
+		bootstrap[k] = v
+	}
+
 	rf := &Raft{
 		id:               id,
 		fsm:              fsm,
-		peers:            peers,
+		peerFactory:      factory,
+		bootstrapCluster: bootstrap,
+		activeMembers:    make(map[NodeID]struct{}),
+		memberAddrs:      make(map[NodeID]string),
+		peers:            make(map[NodeID]*Peer),
 		logger:           slog.Default(),
 		state:            Follower,
 		votedFor:         NoNode,
@@ -81,6 +101,7 @@ func NewRaft(id NodeID, peers map[NodeID]RaftService, fsm StateMachine, opts ...
 		log:              make([]LogEntry, 0),
 		nextIndex:        make(map[NodeID]LogIndex),
 		matchIndex:       make(map[NodeID]LogIndex),
+		appendInFlight:   make(map[NodeID]bool),
 		lastHeartbeatAck: make(map[NodeID]time.Time),
 		stopCh:           make(chan struct{}),
 		applyFutures:     make(map[LogIndex]*indexFuture),
@@ -97,10 +118,19 @@ func NewRaft(id NodeID, peers map[NodeID]RaftService, fsm StateMachine, opts ...
 
 	rf.log = append(rf.log, LogEntry{Term: 0})
 
+	rf.rebuildVolatilePeers(LogIndex(len(rf.log) - 1))
+
 	rf.resetElectionTimer()
 
-	go rf.run()
-	go rf.applier()
+	rf.runWG.Add(2)
+	go func() {
+		defer rf.runWG.Done()
+		rf.run()
+	}()
+	go func() {
+		defer rf.runWG.Done()
+		rf.applier()
+	}()
 
 	return rf
 }
@@ -116,6 +146,7 @@ func (rf *Raft) Submit(command []byte) (bool, LogIndex, Term) {
 	}
 
 	entry := LogEntry{
+		Type:    EntryNormal,
 		Term:    rf.currentTerm,
 		Command: command,
 	}
@@ -123,7 +154,7 @@ func (rf *Raft) Submit(command []byte) (bool, LogIndex, Term) {
 	rf.log = append(rf.log, entry)
 	index := LogIndex(len(rf.log) - 1)
 
-	rf.broadcastReplication()
+	rf.broadcastAppendEntries()
 
 	return true, index, rf.currentTerm
 }
@@ -139,6 +170,88 @@ func (rf *Raft) SubmitAndWait(ctx context.Context, command []byte) (bool, LogInd
 	return true, index, term, nil
 }
 
+func (rf *Raft) AddNode(id NodeID, addr string) error {
+	cmd, err := encodeConfigAdd(id, addr)
+	if err != nil {
+		return err
+	}
+
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return ErrNotLeader
+	}
+	if rf.hasPendingAddVoterOrRemove() {
+		rf.mu.Unlock()
+		return ErrConfigChangeInProgress
+	}
+	if rf.isMember(id) {
+		rf.mu.Unlock()
+		return ErrPeerAlreadyInCluster
+	}
+
+	entry := LogEntry{
+		Type:    EntryAddLearner,
+		Term:    rf.currentTerm,
+		Command: cmd,
+	}
+	rf.log = append(rf.log, entry)
+	index := LogIndex(len(rf.log) - 1)
+	rf.rebuildVolatilePeers(index)
+	rf.logf(slog.LevelInfo, "added node %d addr=%q as LEARNER (uncommitted) at index %d", id, addr, index)
+	rf.broadcastAppendEntries()
+	rf.startCatchUpPromoter(id)
+	rf.mu.Unlock()
+	return nil
+}
+
+func (rf *Raft) RemoveNode(id NodeID) error {
+	cmd, err := encodeConfigRemove(id)
+	if err != nil {
+		return err
+	}
+
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return ErrNotLeader
+	}
+	if !rf.isMember(id) {
+		rf.mu.Unlock()
+		return ErrNodeNotInCluster
+	}
+	if rf.hasPendingMembershipCommit() {
+		rf.mu.Unlock()
+		return ErrConfigChangeInProgress
+	}
+
+	selfRemove := id == rf.id
+
+	entry := LogEntry{
+		Type:    EntryRemoveNode,
+		Term:    rf.currentTerm,
+		Command: cmd,
+	}
+	rf.log = append(rf.log, entry)
+	index := LogIndex(len(rf.log) - 1)
+	rf.rebuildVolatilePeers(index)
+	rf.logf(slog.LevelInfo, "removed node %d from peers configuration (uncommitted) at index %d", id, index)
+	rf.broadcastAppendEntries()
+	rf.mu.Unlock()
+
+	if err := rf.waitForApplied(context.Background(), index); err != nil {
+		return err
+	}
+
+	if selfRemove {
+		rf.mu.Lock()
+		rf.becomeFollower(rf.currentTerm)
+		rf.mu.Unlock()
+		rf.logf(slog.LevelInfo, "stepped down after committed self-removal from cluster")
+	}
+	return nil
+}
+
 func (rf *Raft) LeaderHint() NodeID {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -152,5 +265,14 @@ func (rf *Raft) LeaderHint() NodeID {
 }
 
 func (rf *Raft) Stop() {
-	close(rf.stopCh)
+	rf.stopOnce.Do(func() {
+		close(rf.stopCh)
+		rf.mu.Lock()
+		rf.applyCond.Broadcast()
+		rf.mu.Unlock()
+	})
+}
+
+func (rf *Raft) WaitStopped() {
+	rf.runWG.Wait()
 }

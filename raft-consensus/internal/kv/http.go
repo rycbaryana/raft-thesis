@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"raft-consensus/internal/raft"
@@ -34,8 +36,50 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/put", s.handlePut)
 	mux.HandleFunc("/get", s.handleGet)
+	mux.HandleFunc("/cluster/nodes", s.handleClusterNodes)
 	mux.HandleFunc("/debug/network/partition", s.handleDebugNetworkPartition)
-	return mux
+	return s.withRequestLog(mux)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += n
+	return n, err
+}
+
+func (s *HTTPServer) withRequestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		level := slog.LevelInfo
+		if rec.status >= 500 {
+			level = slog.LevelError
+		} else if rec.status >= 400 {
+			level = slog.LevelWarn
+		}
+
+		s.service.Logger().Log(r.Context(), level, "http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"query", r.URL.RawQuery,
+			"status", rec.status,
+			"bytes", rec.bytes,
+			"duration", time.Since(start),
+		)
+	})
 }
 
 type jsonErr struct {
@@ -50,6 +94,11 @@ type jsonPutOK struct {
 type jsonGetOK struct {
 	OK    bool   `json:"ok"`
 	Value string `json:"value"`
+}
+
+type jsonAddClusterNodeReq struct {
+	ID   int    `json:"id"`
+	Addr string `json:"addr"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -110,6 +159,102 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, jsonPutOK{OK: true})
+}
+
+func (s *HTTPServer) writeClusterMembershipErr(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, raft.ErrNotLeader):
+		s.setLeaderHintHeader(w)
+		writeJSON(w, http.StatusServiceUnavailable, jsonErr{OK: false, Error: "not leader"})
+		return true
+	case errors.Is(err, raft.ErrConfigChangeInProgress):
+		writeJSON(w, http.StatusConflict, jsonErr{OK: false, Error: "configuration change already in progress"})
+		return true
+	case errors.Is(err, context.Canceled):
+		writeJSON(w, statusClientClosed, jsonErr{OK: false, Error: "request canceled"})
+		return true
+	case errors.Is(err, context.DeadlineExceeded):
+		writeJSON(w, http.StatusGatewayTimeout, jsonErr{OK: false, Error: "timeout waiting for commit"})
+		return true
+	case errors.Is(err, raft.ErrNodeNotInCluster):
+		writeJSON(w, http.StatusNotFound, jsonErr{OK: false, Error: "node not in cluster"})
+		return true
+	case errors.Is(err, raft.ErrPeerAlreadyInCluster):
+		writeJSON(w, http.StatusConflict, jsonErr{OK: false, Error: "node already in cluster"})
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *HTTPServer) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleClusterAddNode(w, r)
+	case http.MethodDelete:
+		s.handleClusterRemoveNode(w, r)
+	default:
+		w.Header().Set("Allow", strings.Join([]string{http.MethodPost, http.MethodDelete}, ", "))
+		writeJSON(w, http.StatusMethodNotAllowed, jsonErr{OK: false, Error: "method not allowed"})
+	}
+}
+
+func (s *HTTPServer) handleClusterAddNode(w http.ResponseWriter, r *http.Request) {
+	var req jsonAddClusterNodeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonErr{OK: false, Error: "invalid JSON body"})
+		return
+	}
+	if req.Addr == "" {
+		writeJSON(w, http.StatusBadRequest, jsonErr{OK: false, Error: "missing addr"})
+		return
+	}
+	if req.ID <= 0 {
+		writeJSON(w, http.StatusBadRequest, jsonErr{OK: false, Error: "id must be positive"})
+		return
+	}
+
+	ctx, cancel := s.requestContext(r)
+	defer cancel()
+
+	err := s.service.AddClusterNode(ctx, raft.NodeID(req.ID), req.Addr)
+	if err != nil {
+		if s.writeClusterMembershipErr(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, jsonErr{OK: false, Error: err.Error()})
+		return
+	}
+
+	s.service.Logger().Info("cluster node added via HTTP", "node_id", req.ID, "addr", req.Addr)
+	writeJSON(w, http.StatusOK, jsonPutOK{OK: true})
+}
+
+func (s *HTTPServer) handleClusterRemoveNode(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("id")
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, jsonErr{OK: false, Error: "missing query id"})
+		return
+	}
+	id64, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id64 <= 0 {
+		writeJSON(w, http.StatusBadRequest, jsonErr{OK: false, Error: "id must be a positive integer"})
+		return
+	}
+
+	ctx, cancel := s.requestContext(r)
+	defer cancel()
+
+	if err := s.service.RemoveClusterNode(ctx, raft.NodeID(id64)); err != nil {
+		if s.writeClusterMembershipErr(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, jsonErr{OK: false, Error: err.Error()})
+		return
+	}
+
+	s.service.Logger().Info("cluster node removed via HTTP", "node_id", id64)
 	writeJSON(w, http.StatusOK, jsonPutOK{OK: true})
 }
 

@@ -8,6 +8,7 @@ type Config struct {
 	MaxElectionTimeout          time.Duration
 	RPCTimeout                  time.Duration
 	LeaderQuorumLivenessTimeout time.Duration
+	CatchUpPromoteThreshold     int
 }
 
 func DefaultTestingConfig() Config {
@@ -17,6 +18,7 @@ func DefaultTestingConfig() Config {
 		MaxElectionTimeout:          15 * time.Second,
 		RPCTimeout:                  1 * time.Second,
 		LeaderQuorumLivenessTimeout: 15 * time.Second,
+		CatchUpPromoteThreshold:     10,
 	}
 }
 
@@ -25,8 +27,9 @@ func DefaultProductionConfig() Config {
 		HeartbeatInterval:           50 * time.Millisecond,
 		MinElectionTimeout:          150 * time.Millisecond,
 		MaxElectionTimeout:          300 * time.Millisecond,
-		RPCTimeout:                  1 * time.Second,
+		RPCTimeout:                  5 * time.Second,
 		LeaderQuorumLivenessTimeout: 300 * time.Millisecond,
+		CatchUpPromoteThreshold:     10,
 	}
 }
 
@@ -47,6 +50,9 @@ func (c Config) normalize() Config {
 	}
 	if c.LeaderQuorumLivenessTimeout <= 0 {
 		c.LeaderQuorumLivenessTimeout = d.LeaderQuorumLivenessTimeout
+	}
+	if c.CatchUpPromoteThreshold <= 0 {
+		c.CatchUpPromoteThreshold = d.CatchUpPromoteThreshold
 	}
 	return c
 }

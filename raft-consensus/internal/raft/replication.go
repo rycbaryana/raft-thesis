@@ -5,38 +5,35 @@ import (
 	"time"
 )
 
-func (rf *Raft) sendReplication(peerId NodeID, peer RaftService) bool {
-	return rf.leaderSendAppendEntries(peerId, peer, false)
-}
-
-func (rf *Raft) broadcastReplication() {
-	for peerId, peer := range rf.peers {
-		if peerId == rf.id {
-			continue
-		}
-		go rf.sendReplication(peerId, peer)
-	}
-}
-
-func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbeatOnly bool) bool {
+func (rf *Raft) sendAppendEntries(peerId NodeID) bool {
 	rf.mu.Lock()
 	if rf.state != Leader {
 		rf.mu.Unlock()
 		return false
 	}
 
+	p := rf.peers[peerId]
+	if p == nil || p.Client == nil {
+		rf.mu.Unlock()
+		return false
+	}
+	if rf.appendInFlight == nil {
+		rf.appendInFlight = make(map[NodeID]bool)
+	}
+	if rf.appendInFlight[peerId] {
+		rf.mu.Unlock()
+		return false
+	}
+	rf.appendInFlight[peerId] = true
+
 	nextIdx := rf.nextIndex[peerId]
 	lastLogIdx, _ := rf.getLastLogInfo()
 
 	var entries []LogEntry
-	if heartbeatOnly {
-		entries = nil
-	} else {
-		if nextIdx > lastLogIdx {
-			rf.mu.Unlock()
-			return true
-		}
+	if nextIdx <= lastLogIdx {
 		entries = rf.log[nextIdx:]
+	} else {
+		entries = nil
 	}
 
 	prevLogIndex := nextIdx - 1
@@ -50,7 +47,13 @@ func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbe
 		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
+	client := p.Client
 	rf.mu.Unlock()
+	defer func() {
+		rf.mu.Lock()
+		rf.appendInFlight[peerId] = false
+		rf.mu.Unlock()
+	}()
 
 	replyCh := make(chan struct {
 		reply AppendEntriesReply
@@ -59,7 +62,7 @@ func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbe
 
 	go func() {
 		var reply AppendEntriesReply
-		err := peer.AppendEntries(args, &reply)
+		err := client.AppendEntries(args, &reply)
 		replyCh <- struct {
 			reply AppendEntriesReply
 			err   error
@@ -84,9 +87,8 @@ func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbe
 	}
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	if rf.state != Leader {
+		rf.mu.Unlock()
 		return false
 	}
 
@@ -98,6 +100,7 @@ func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbe
 
 	if reply.Term > rf.currentTerm {
 		rf.becomeFollower(reply.Term)
+		rf.mu.Unlock()
 		return false
 	}
 
@@ -109,9 +112,8 @@ func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbe
 
 			rf.updateCommitIndex()
 		}
-		if heartbeatOnly {
-			rf.lastHeartbeatAck[peerId] = time.Now()
-		}
+		rf.lastHeartbeatAck[peerId] = time.Now()
+		rf.mu.Unlock()
 		return true
 	}
 
@@ -137,8 +139,17 @@ func (rf *Raft) leaderSendAppendEntries(peerId NodeID, peer RaftService, heartbe
 	if rf.nextIndex[peerId] < 1 {
 		rf.nextIndex[peerId] = 1
 	}
-
+	rf.mu.Unlock()
 	return false
+}
+
+func (rf *Raft) broadcastAppendEntries() {
+	for peerId, peer := range rf.peers {
+		if peerId == rf.id || peer == nil || peer.Client == nil {
+			continue
+		}
+		go rf.sendAppendEntries(peerId)
+	}
 }
 
 func (rf *Raft) updateCommitIndex() {
@@ -152,8 +163,11 @@ func (rf *Raft) updateCommitIndex() {
 			continue
 		}
 
-		count := 1 // self
-		for peerId := range rf.peers {
+		count := 0
+		if rf.isVoter(rf.id) {
+			count++
+		}
+		for peerId := range rf.voterMembers {
 			if peerId == rf.id {
 				continue
 			}
@@ -179,6 +193,11 @@ func (rf *Raft) applier() {
 
 	for {
 		for rf.commitIndex <= rf.lastApplied {
+			select {
+			case <-rf.stopCh:
+				return
+			default:
+			}
 			rf.applyCond.Wait()
 		}
 
@@ -193,13 +212,18 @@ func (rf *Raft) applier() {
 		for i, entry := range entries {
 			index := baseIndex + 1 + LogIndex(i)
 			var applyErr error
-			if rf.fsm != nil && entry.Command != nil {
-				rf.logf(slog.LevelDebug, "Applying command %d: %s", index, string(entry.Command))
-				_, applyErr = rf.fsm.Apply(entry.Command)
-				if applyErr != nil {
-					rf.mu.Lock()
-					rf.getFuture(index).err = applyErr
-					rf.mu.Unlock()
+			switch entry.Type {
+			case EntryAddLearner, EntryAddVoter, EntryRemoveNode:
+				continue
+			default:
+				if rf.fsm != nil && entry.Command != nil {
+					rf.logf(slog.LevelDebug, "Applying command %d: %s", index, string(entry.Command))
+					_, applyErr = rf.fsm.Apply(entry.Command)
+					if applyErr != nil {
+						rf.mu.Lock()
+						rf.getFuture(index).err = applyErr
+						rf.mu.Unlock()
+					}
 				}
 			}
 		}

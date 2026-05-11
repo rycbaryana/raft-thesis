@@ -2,16 +2,19 @@
 # Рубильник полной эмуляции разрыва Raft-сети на узле (исходящие + входящие RPC).
 #
 # Usage:
-#   ./debug-network.sh on <1|2|3>     # isolated=true
-#   ./debug-network.sh off <1|2|3>    # isolated=false
+#   ./debug-network.sh on <node_id>     # isolated=true
+#   ./debug-network.sh off <node_id>   # isolated=false
 # Синонимы: disconnect/reconnect (как раньше)
 
 set -euo pipefail
-cd "$(dirname "$0")"
+_RAFTP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck disable=SC1091
+source "$_RAFTP_DIR/raft-common.sh"
+cd "$_RAFTP_DIR"
 
 usage() {
-	echo "Usage: $0 on|off <1|2|3>" >&2
-	echo "       $0 disconnect|reconnect <1|2|3>  # same as on/off" >&2
+	echo "Usage: $0 on|off <node_id>" >&2
+	echo "       $0 disconnect|reconnect <node_id>" >&2
 	exit 1
 }
 
@@ -22,8 +25,8 @@ fi
 ACTION=$1
 ID=$2
 
-if [[ ! "$ID" =~ ^[123]$ ]]; then
-	echo "Invalid node id: $ID (expected 1, 2, or 3)" >&2
+if ! raft_valid_node_id "$ID"; then
+	echo "Invalid node id: $ID (expected positive integer)" >&2
 	exit 1
 fi
 

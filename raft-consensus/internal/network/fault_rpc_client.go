@@ -1,6 +1,7 @@
 package network
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"raft-consensus/internal/raft"
@@ -42,6 +43,7 @@ func (c *FaultInjectingRPCClient) AppendEntries(args *raft.AppendEntriesArgs, re
 }
 
 type OutgoingNetworkSwitch struct {
+	mu      sync.RWMutex
 	proxies []*FaultInjectingRPCClient
 }
 
@@ -51,13 +53,24 @@ func NewOutgoingNetworkSwitch(proxies ...*FaultInjectingRPCClient) *OutgoingNetw
 	return &OutgoingNetworkSwitch{proxies: p}
 }
 
+// AddProxy registers a fault-injecting client so partition toggles apply to dynamically added peers.
+func (s *OutgoingNetworkSwitch) AddProxy(p *FaultInjectingRPCClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proxies = append(s.proxies, p)
+}
+
 func (s *OutgoingNetworkSwitch) DisconnectOutgoing() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, p := range s.proxies {
 		p.Disconnect()
 	}
 }
 
 func (s *OutgoingNetworkSwitch) ReconnectOutgoing() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, p := range s.proxies {
 		p.Reconnect()
 	}

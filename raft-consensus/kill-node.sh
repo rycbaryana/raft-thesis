@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Stop one or more nodes by ID (listener on localhost:8081..8083).
-# Usage: ./kill-node.sh <1|2|3> [1|2|3 ...]
-# Example: ./kill-node.sh 2        # kill follower/leader on 8082
-#          ./kill-node.sh 2 3      # partition two nodes
+# Stop one or more nodes by ID (listener on localhost:8080+id).
+# Usage: ./kill-node.sh <node_id> [node_id ...]
+# Example: ./kill-node.sh 2        # kill node on 8082
+#          ./kill-node.sh 2 3 4
 
 set -euo pipefail
-cd "$(dirname "$0")"
+_RAFTP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck disable=SC1091
+source "$_RAFTP_DIR/raft-common.sh"
+cd "$_RAFTP_DIR"
 
 if [[ $# -lt 1 ]]; then
-	echo "Usage: $0 <1|2|3> [1|2|3 ...]" >&2
+	echo "Usage: $0 <node_id> [node_id ...]" >&2
 	exit 1
 fi
 
 for ID in "$@"; do
-	if [[ ! "$ID" =~ ^[123]$ ]]; then
-		echo "Invalid node id: $ID (expected 1, 2, or 3)" >&2
+	if ! raft_valid_node_id "$ID"; then
+		echo "Invalid node id: $ID (expected positive integer)" >&2
 		exit 1
 	fi
 	PORT=$((8080 + ID))

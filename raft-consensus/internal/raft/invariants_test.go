@@ -34,9 +34,18 @@ func (m *raftServiceMock) AppendEntries(args *AppendEntriesArgs, reply *AppendEn
 }
 
 func newTestRaft() *Raft {
+	bootstrap := map[NodeID]string{
+		1: "n1",
+		2: "n2",
+		3: "n3",
+	}
 	rf := &Raft{
 		id:               1,
-		peers:            map[NodeID]RaftService{},
+		peerFactory:      func(NodeID, string) RaftService { return nil },
+		bootstrapCluster: bootstrap,
+		activeMembers:    map[NodeID]struct{}{},
+		memberAddrs:      map[NodeID]string{},
+		peers:            map[NodeID]*Peer{},
 		log:              []LogEntry{{Term: 0}},
 		nextIndex:        map[NodeID]LogIndex{},
 		matchIndex:       map[NodeID]LogIndex{},
@@ -49,6 +58,7 @@ func newTestRaft() *Raft {
 	}
 	rf.cfg = rf.cfg.normalize()
 	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.rebuildVolatilePeers(LogIndex(len(rf.log) - 1))
 	return rf
 }
 
@@ -76,9 +86,9 @@ func TestUpdateCommitIndexCommitsOnlyCurrentTermByCounting(t *testing.T) {
 	rf := newTestRaft()
 	rf.state = Leader
 	rf.currentTerm = 3
-	rf.peers = map[NodeID]RaftService{
-		2: nil,
-		3: nil,
+	rf.peers = map[NodeID]*Peer{
+		2: &Peer{Client: nil, Role: Voter},
+		3: &Peer{Client: nil, Role: Voter},
 	}
 	rf.log = []LogEntry{
 		{Term: 0},
@@ -148,15 +158,16 @@ func TestLeaderStepsDownOnHigherTermAppendReply(t *testing.T) {
 	rf.currentTerm = 4
 	rf.log = []LogEntry{{Term: 0}, {Term: 4, Command: []byte("x")}}
 	rf.nextIndex[2] = 1
-	rf.peers[2] = &raftServiceMock{
+	mock := &raftServiceMock{
 		appendFn: func(_ *AppendEntriesArgs, reply *AppendEntriesReply) error {
 			reply.Success = false
 			reply.Term = 5
 			return nil
 		},
 	}
+	rf.peers[2] = &Peer{Client: mock, Role: Voter}
 
-	ok := rf.sendReplication(2, rf.peers[2])
+	ok := rf.sendAppendEntries(2)
 	if ok {
 		t.Fatalf("expected replication failure on higher term reply")
 	}
@@ -178,7 +189,7 @@ func TestSendHeartbeatReturnsFalseOnConflict(t *testing.T) {
 	rf.lastHeartbeatAck[2] = time.Now().Add(-24 * time.Hour)
 	stale := rf.lastHeartbeatAck[2]
 
-	rf.peers[2] = &raftServiceMock{
+	mockHB := &raftServiceMock{
 		appendFn: func(_ *AppendEntriesArgs, reply *AppendEntriesReply) error {
 			reply.Success = false
 			reply.ConflictIndex = 1
@@ -187,12 +198,13 @@ func TestSendHeartbeatReturnsFalseOnConflict(t *testing.T) {
 			return nil
 		},
 	}
+	rf.peers[2] = &Peer{Client: mockHB, Role: Voter}
 
-	if rf.sendHeartbeat(2, rf.peers[2]) {
-		t.Fatalf("expected heartbeat failure on conflict")
+	if rf.sendAppendEntries(2) {
+		t.Fatalf("expected AppendEntries failure on conflict")
 	}
 	if rf.lastHeartbeatAck[2] != stale {
-		t.Fatalf("heartbeat conflict must not refresh lastHeartbeatAck")
+		t.Fatalf("AppendEntries conflict must not refresh lastHeartbeatAck")
 	}
 }
 
@@ -205,7 +217,10 @@ func TestLeaderStepsDownWhenHeartbeatQuorumLost(t *testing.T) {
 	rf.commitIndex = 1
 	rf.nextIndex[2] = 2
 	rf.nextIndex[3] = 2
-	rf.peers = map[NodeID]RaftService{2: nil, 3: nil}
+	rf.peers = map[NodeID]*Peer{
+		2: &Peer{Client: nil, Role: Voter},
+		3: &Peer{Client: nil, Role: Voter},
+	}
 	rf.cfg.LeaderQuorumLivenessTimeout = time.Minute
 	rf.lastHeartbeatAck[2] = time.Now().Add(-24 * time.Hour)
 	rf.lastHeartbeatAck[3] = time.Now().Add(-24 * time.Hour)
@@ -241,9 +256,11 @@ func TestReadIndexSendsOnlyHeartbeats(t *testing.T) {
 		reply.Term = 2
 		return nil
 	}
-	rf.peers = map[NodeID]RaftService{
-		2: &raftServiceMock{appendFn: mockFn},
-		3: &raftServiceMock{appendFn: mockFn},
+	m2 := &raftServiceMock{appendFn: mockFn}
+	m3 := &raftServiceMock{appendFn: mockFn}
+	rf.peers = map[NodeID]*Peer{
+		2: &Peer{Client: m2, Role: Voter},
+		3: &Peer{Client: m3, Role: Voter},
 	}
 
 	idx, err := rf.ReadIndex(context.Background())

@@ -29,10 +29,34 @@ func (s State) String() string {
 	}
 }
 
+type EntryType int
+
+const (
+	EntryNormal EntryType = iota
+	EntryAddLearner
+	EntryAddVoter
+	EntryRemoveNode
+)
+
 type LogEntry struct {
+	Type    EntryType
 	Term    Term
 	Command []byte
 }
+
+type PeerRole int
+
+const (
+	Voter PeerRole = iota
+	Learner
+)
+
+type Peer struct {
+	Client RaftService
+	Role   PeerRole
+}
+
+type PeerFactory func(id NodeID, addr string) RaftService
 
 type ApplyMsg struct {
 	CommandValid bool

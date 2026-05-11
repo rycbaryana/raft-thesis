@@ -1,6 +1,9 @@
 package raft
 
-import "log/slog"
+import (
+	"log/slog"
+	"time"
+)
 
 type RaftService interface {
 	// RequestVote is invoked by candidates to gather votes.
@@ -61,16 +64,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 4. Append New Entries
-	for i, entry := range args.Entries {
-		index := args.PrevLogIndex + 1 + LogIndex(i)
-		logSize := LogIndex(len(rf.log))
+	if len(args.Entries) > 0 {
+		needVolatileRebuild := false
+		for i, entry := range args.Entries {
+			index := args.PrevLogIndex + 1 + LogIndex(i)
+			logSize := LogIndex(len(rf.log))
 
-		if index < logSize {
-			if rf.log[index].Term != entry.Term {
-				rf.log = append(rf.log[:index], entry)
+			if index < logSize {
+				if rf.log[index].Term != entry.Term {
+					rf.log = append(rf.log[:index], entry)
+					rf.logf(slog.LevelInfo, "rolled back log tail from index %d (conflicting term)", index)
+					needVolatileRebuild = true
+				}
+			} else {
+				rf.log = append(rf.log, entry)
 			}
-		} else {
-			rf.log = append(rf.log, entry)
+			if entryTypeChangesMembership(entry.Type) {
+				needVolatileRebuild = true
+			}
+		}
+		if needVolatileRebuild {
+			rf.rebuildVolatilePeers(LogIndex(len(rf.log) - 1))
 		}
 	}
 
@@ -102,11 +116,27 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) erro
 		return nil
 	}
 
-	// 2. Step down if fresher term
+	if args.Term > rf.currentTerm &&
+		rf.hintLeaderID != NoNode &&
+		rf.hintLeaderID != args.CandidateID &&
+		time.Since(rf.lastActivity) < rf.cfg.MinElectionTimeout {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		rf.logf(slog.LevelInfo, "Rejected RequestVote from %d (term %d): leader %d still in contact (CheckQuorum)",
+			args.CandidateID, args.Term, rf.hintLeaderID)
+		return nil
+	}
+
+	// 3. Step down if fresher term
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
 	reply.Term = rf.currentTerm
+
+	if !rf.isVoter(rf.id) {
+		reply.VoteGranted = false
+		return nil
+	}
 
 	// 3. Check if already voted
 	if rf.votedFor != NoNode && rf.votedFor != args.CandidateID {
