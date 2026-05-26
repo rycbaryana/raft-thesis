@@ -11,7 +11,7 @@
 \usepackage{mathtools}
 \definecolor{linkcolor}{rgb}{0.0,0.0,0.0}
 \definecolor{urlcolor}{HTML}{799B03}
-\hypersetup{pdfstartview=FitH, linkcolor=linkcolor,urlcolor=urlcolor, colorlinks=true}
+\hypersetup{pdfstartview=FitH, hidelinks}
 \usepackage[14pt]{extsizes}
 \usepackage[
     left=30mm,
@@ -30,7 +30,10 @@
 \usepackage{amssymb}
 \usepackage{caption}
 
-\captionsetup{labelsep=space}
+\parindent=1.25cm
+
+\DeclareCaptionLabelSeparator{thesisdash}{\space---\space}
+\captionsetup{labelsep=thesisdash}
 \addto\captionsrussian{\renewcommand{\figurename}{Рисунок}}
 \titleformat{\chapter}[display]
 {\centering\Large\bfseries}{\chaptertitlename\ \thechapter}{10pt}{\Large}
@@ -45,12 +48,13 @@
     {\centering \large ОГЛАВЛЕНИЕ}%
   \renewcommand{\chaptername}{ГЛАВА}
   \renewcommand{\chaptertitlename}{ГЛАВА}
-  \renewcommand{\bibname}{\large СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ}
+  \renewcommand{\bibname}{\large СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ}
 }
 
 \renewcommand{\baselinestretch}{1.2}
 
 \begin{document}
+\sloppy
 \include{title}
 \include{abstract}
 \tableofcontents
