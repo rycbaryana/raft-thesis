@@ -1,0 +1,285 @@
+\ProvidesPackage{BSUStyle}[2017/05/01 BSU diploma and master thesis package]
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ПАКЕТЫ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\RequirePackage[russian]{babel}
+\RequirePackage{indentfirst}
+\RequirePackage{graphicx}
+\RequirePackage{amsmath,amsfonts,amssymb}
+\RequirePackage{cite}
+\RequirePackage{multirow}
+\RequirePackage{epstopdf}
+\RequirePackage{tikz}
+\usetikzlibrary{positioning}
+\RequirePackage{listings}
+\RequirePackage{booktabs} % Красивые таблицы
+\RequirePackage{siunitx}  % Для выравнивания чисел по точке
+\RequirePackage{minted}
+\RequirePackage{dirtree}
+\RequirePackage{tabularx}
+\RequirePackage{url}
+\RequirePackage{ragged2e}
+% \RequirePackage{tempora} % делает шрифт как в ворде
+
+\RequirePackage{geometry}
+\geometry{left=3cm}
+\geometry{right=1.5cm}
+\geometry{top=2cm}
+\geometry{bottom=2cm}
+
+\parindent=12.5mm
+\newlength{\myparindent}
+\setlength{\myparindent}{\parindent} 
+\sloppy
+
+\numberwithin{equation}{chapter}
+
+\RequirePackage{setspace}
+\setstretch{1.1}
+
+\RequirePackage{enumitem}
+
+% Убираем все вертикальные отступы между пунктами во всех списках
+\setlist{nosep} 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ТЕОРЕМЫ И ПРОЧЕЕ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newtheorem{theorem}{Теорема}[chapter]
+\newtheorem{corollary}{Следствие}[chapter]
+\newtheorem{lemma}{Лемма}[chapter]
+\newtheorem{proposition}{Утверждение}[chapter]
+\newtheorem{remark}{Замечание}[chapter]
+\newtheorem{assumption}{Предположение}[chapter]
+\newtheorem{example}{Пример}[chapter]
+\newtheorem{definition}{Определение}[chapter]
+
+\newcommand{\proof}{\par\mbox{Доказательство.}\hspace{2mm}}
+\newcommand{\proofnp}{\par\mbox{Доказательство}\hspace{2mm}}
+
+\makeatletter
+\def\@begintheorem#1#2{%
+  \trivlist
+  \item[\hskip\labelsep{\hspace*{\parindent}\bfseries #1\ #2}]%
+}
+\makeatother
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% РИСУНКИ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newcounter{figcount}[chapter]
+\renewcommand{\thefigcount}{\arabic{chapter}.\arabic{figcount}}
+\newcommand{\dfig}[1]{%
+  \refstepcounter{figcount}%
+  {\small \bfseries Рисунок \thefigcount\ -- }%
+  {\normalsize \bfseries #1}%
+}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% СТРУКТУРНЫЕ ЧАСТИ (С КОРРЕКТНЫМИ И РАЗЛИЧИМЫМИ РАЗМЕРАМИ ШРИФТОВ)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\RequirePackage{titlesec}
+
+\newcommand{\chapterbreak}{\clearpage}
+
+% ГЛАВА: строго 16pt (на 2 пункта больше основного 14pt, по методичке)
+\titleformat{\chapter}[display]{\bfseries\fontsize{16pt}{18pt}\selectfont\centering}{ГЛАВА \ \thechapter}{0em}{}
+\titlespacing{\chapter}{0em}{-1.5em}{0em} 
+
+\makeatletter
+
+% АВТО-ВЫРАВНИВАНИЕ: Перехватываем \chapter* и вшиваем туда \addvspace{36pt}
+\let\oldchapter\chapter
+\renewcommand{\chapter}{%
+  \@ifstar{\@starredchapter}{\oldchapter}%
+}
+\newcommand{\@starredchapter}[1]{%
+  \oldchapter*{#1}%
+  \par\addvspace{36pt}%
+}
+
+% Формат номера раздела/подраздела: БЕЗ точки, с пробелом
+\renewcommand*{\@seccntformat}[1]{%
+  \csname the#1\endcsname\quad
+}
+
+% РАЗДЕЛ
+\renewcommand{\section}[1]{%
+  \refstepcounter{section}%
+  \addcontentsline{toc}{section}{\thesection\quad #1}%
+  \par\vspace{24pt}% 
+  {%
+    \normalfont\bfseries\fontsize{16pt}{18pt}\selectfont\RaggedRight % <-- Заменили на \RaggedRight
+    \noindent\hspace*{\myparindent}\@seccntformat{section}#1\par 
+  }%
+  \vspace{24pt}% 
+}
+
+% ПОДРАЗДЕЛ: разумный компромисс
+\renewcommand{\subsection}[1]{%
+  \refstepcounter{subsection}%
+  \addcontentsline{toc}{subsection}{\thesubsection\quad #1}%
+  \par\vspace{24pt}% <-- 24pt до заголовка
+  {%
+    \normalfont\bfseries\fontsize{14pt}{18pt}\selectfont\raggedright
+    \noindent\hspace*{\myparindent}\@seccntformat{subsection}#1\par 
+  }%
+  \vspace{24pt}% <-- 24pt после заголовка
+}
+
+% Раздел приложения (А.1, А.2 и т.д.)
+\newcommand{\appsection}[2]{%
+  \addcontentsline{toc}{section}{#1~#2}%
+  \par\vspace{24pt}% <-- 24pt до заголовка
+  {%
+    \normalfont\bfseries\fontsize{16pt}{18pt}\selectfont
+    \sloppy % <-- Разрешаем свободный перенос длинных слов и названий файлов
+    \noindent\hspace*{\myparindent}#1~#2\par
+  }%
+  \vspace{24pt}% <-- 24pt после заголовка
+}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% СОДЕРЖАНИЕ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\addto\captionsrussian{%
+  \def\contentsname{ОГЛАВЛЕНИЕ}%
+}
+\setcounter{tocdepth}{2}
+
+\RequirePackage{titletoc}
+
+\makeatletter
+\renewcommand\tableofcontents{%
+  \clearpage
+  \chapter*{\contentsname}
+  \vspace{-6pt}% 
+  \@starttoc{toc}%
+}
+\makeatother
+
+\titlecontents{chapter}[0pt]%
+  {\vspace{0.3em}}%
+  {\bfseries ГЛАВА \thecontentslabel\quad }
+  {\bfseries}%
+  {\titlerule*[1pc]{.}\contentspage}
+
+\titlecontents{section}[0pt]%
+  {}%
+  {\thecontentslabel\quad}%
+  {}%
+  {\titlerule*[1pc]{.}\contentspage}
+
+\titlecontents{subsection}[0pt]%
+  {}%
+  {\thecontentslabel\quad}%
+  {}%
+  {\titlerule*[1pc]{.}\contentspage}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ЛИТЕРАТУРА
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Список литературы как обычный нумерованный список (в виде абзацев)
+\newenvironment{biblio}{%
+  \clearpage
+  \addcontentsline{toc}{chapter}{СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ}%
+  {%
+    \centering
+    \parindent=0pt
+    \normalfont\bfseries\fontsize{16pt}{18pt}\selectfont
+    СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\par
+  }%
+  \addvspace{36pt}% отступ после заголовка
+  \begin{list}{\arabic{enumi}.}{\usecounter{enumi}
+    \setlength{\leftmargin}{0pt}         % Вторая и последующие строки идут строго по левому краю
+    \setlength{\itemindent}{\myparindent}% Первая строка с номером начинается с абзацного отступа
+    \setlength{\itemsep}{0pt}            % Нормальный интервал между записями
+  }
+}{%
+  \end{list}
+}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% МАТЕМАТИЧЕСКИЕ ОБОЗНАЧЕНИЯ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newcommand{\rank}{\mathop{\rm rank}\nolimits}
+\newcommand{\diag}{\mathop{\rm diag}\nolimits}
+\newcommand{\dett}{\mathop{\rm det}\nolimits}
+\newcommand{\intt}{\mathop{\rm int}\nolimits}
+\newcommand{\sign}{\mathop{\rm sign}\nolimits}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\st}{\textrm{при}\ }
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ТИТУЛЬНЫЙ ЛИСТ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\makeatletter
+
+\newcommand*{\project}[1]{\gdef\@project{#1}}
+\newcommand*{\supervisor}[1]{\gdef\@supervisor{#1}}
+\newcommand*{\spec}[1]{\gdef\@spec{#1}}
+
+\def\BSUtitle{%
+  \begin{titlepage}
+    \baselineskip 1.7em
+
+    \begin{center}
+      МИНИСТЕРСТВО ОБРАЗОВАНИЯ РЕСПУБЛИКИ БЕЛАРУСЬ\\
+      БЕЛОРУССКИЙ ГОСУДАРСТВЕННЫЙ УНИВЕРСИТЕТ\\
+      ФАКУЛЬТЕТ ПРИКЛАДНОЙ МАТЕМАТИКИ И ИНФОРМАТИКИ\\
+      Кафедра информационных систем управления\\[2em]
+
+      \vfill
+
+      \@author
+
+      \vskip 2em
+
+      {\bfseries \@title}
+
+      \vskip 2em
+
+      \@project
+    \end{center}
+
+    \vfill
+
+    {\hspace*{8cm}%
+      \begin{minipage}[t]{0.5\textwidth}
+        Научный руководитель:\\
+        \@supervisor
+      \end{minipage}%
+    }
+
+    \vfill
+
+    \noindent
+    \begin{minipage}[t]{0.7\textwidth}
+      Допущена к защите\\
+      <<\rule{1cm}{0.2pt}>> \rule{4cm}{0.2pt} {\the\year\ г.}\\
+      Зав. кафедрой информационных систем управления\\
+      доктор технических наук, доцент А.М. Недзьведь
+    \end{minipage}
+
+    \vskip 4em
+
+    \centerline{Минск, \the\year}
+  \end{titlepage}
+  \setcounter{page}{2}
+}
+
+\makeatother

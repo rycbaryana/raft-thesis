@@ -1,0 +1,69 @@
+\documentclass[14pt]{report}
+\usepackage[english,russian]{babel}
+\usepackage{setspace}
+\usepackage[unicode]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{wasysym}
+\usepackage{latexsym}
+\usepackage{indentfirst}
+\usepackage{mathtools}
+\definecolor{linkcolor}{rgb}{0.0,0.0,0.0}
+\definecolor{urlcolor}{HTML}{799B03}
+\hypersetup{pdfstartview=FitH, hidelinks}
+\usepackage[14pt]{extsizes}
+\usepackage[
+    left=30mm,
+    top=20mm,
+    right=15mm,
+    bottom=20mm
+]{geometry}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{afterpage}
+\usepackage{titlesec}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{csquotes}
+\usepackage{mathrsfs}
+\usepackage{amssymb}
+\usepackage{caption}
+
+\parindent=1.25cm
+
+\DeclareCaptionLabelSeparator{thesisdash}{\space---\space}
+\captionsetup{labelsep=thesisdash}
+\addto\captionsrussian{\renewcommand{\figurename}{Рисунок}}
+\titleformat{\chapter}[display]
+{\centering\Large\bfseries}{\chaptertitlename\ \thechapter}{10pt}{\Large}
+\titlespacing*{\chapter}{5pt}{-20pt}{30pt}
+
+\titleformat{\section}[block]
+  {\large\bfseries}
+  {\thesection\ }{0pt}{}
+
+\addto\captionsrussian{%
+  \renewcommand{\contentsname}%
+    {\centering \large ОГЛАВЛЕНИЕ}%
+  \renewcommand{\chaptername}{ГЛАВА}
+  \renewcommand{\chaptertitlename}{ГЛАВА}
+  \renewcommand{\bibname}{\large СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ}
+}
+
+\renewcommand{\baselinestretch}{1.2}
+
+\begin{document}
+\sloppy
+\include{title}
+\include{abstract}
+\tableofcontents
+\include{intro}
+\include{chapter1}
+\include{chapter2}
+\include{chapter3}
+\include{chapter4}
+\include{chapter5}
+\include{conclusion}
+\include{literature}
+\end{document}
